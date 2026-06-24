@@ -2,24 +2,29 @@
 Coursework & Lift Tracker - Streamlit MVP (iteration 2)
 =======================================================
 
-Two tools, one user (you):
+STUDY (Tab 1):  paste lecture notes or upload a PDF and generate a real
+                multiple-choice / short-answer practice test with an LLM
+                (OpenAI or Anthropic). The API key is read from the app's
+                settings (st.secrets) so you, the owner, set it ONCE and end
+                users never type a key. A manual key box appears only if no
+                key is configured.
 
-  STUDY (Tab 1):  paste lecture notes or upload a PDF, and generate a real
-                  multiple-choice / short-answer practice test using an LLM
-                  (OpenAI or Anthropic). Clean flashcard-style review UI.
+LIFT  (Tab 2):  paste your workout notes the way you keep them. The app reads
+                your weights and reps and recommends the next session using
+                DOUBLE PROGRESSION (the standard method): add reps inside a
+                target range first, then add load once you hit the top of the
+                range. Rep ranges and load jumps default by lift type
+                (heavy compounds 4-6, isolation 8-12, small delt work 12-15)
+                and are fully editable. Nothing auto-progresses if you mark a
+                lift as missed.
 
-  LIFT  (Tab 2):  paste your workout notes the way you actually keep them in
-                  a Google Doc. The app parses them, applies linear
-                  progressive overload (hit target -> add weight; miss ->
-                  hold), and prints your exact targets for next session,
-                  ready to paste back into your notes.
+Rep-range and double-progression defaults follow standard strength guidance
+(NSCA): strength compounds <=6 reps, hypertrophy 6-12, isolation/finishers
+12+; increase reps within range, then load. See README for sources.
 
 Run it:
     pip install -r requirements.txt
     streamlit run app.py
-
-The parsing and progression logic at the top of this file is plain Python
-with no Streamlit dependency, so it can be unit-tested on its own.
 """
 
 import io
@@ -27,47 +32,39 @@ import re
 import json
 
 # ======================================================================
-#  STUDY: prompt building + LLM calls + response parsing  (pure/testable)
+#  STUDY: prompt + LLM calls + parsing  (pure/testable)
 # ======================================================================
 
 def build_quiz_prompt(source_text, qtype, n):
-    """Return the instruction sent to the model. Asks for strict JSON."""
     if qtype == "Multiple choice":
-        shape = (
-            'a JSON array of objects, each: '
-            '{"question": str, "choices": [4 strings], '
-            '"answer": "the exact correct choice", "explanation": str}'
-        )
+        shape = ('a JSON array of objects, each: {"question": str, '
+                 '"choices": [4 strings], "answer": "the exact correct choice", '
+                 '"explanation": str}')
     else:
-        shape = (
-            'a JSON array of objects, each: '
-            '{"question": str, "choices": [], '
-            '"answer": str, "explanation": str}'
-        )
+        shape = ('a JSON array of objects, each: {"question": str, '
+                 '"choices": [], "answer": str, "explanation": str}')
     return (
-        f"You are a study-quiz generator. Using ONLY the material below, "
-        f"write {n} {qtype.lower()} questions that test understanding of the "
-        f"key concepts. Return {shape}. Return JSON only, no prose.\n\n"
+        f"You are a study-quiz generator. Using ONLY the material below, write "
+        f"{n} {qtype.lower()} questions that test understanding of the key "
+        f"concepts. Return {shape}. Return JSON only, no prose.\n\n"
         f"MATERIAL:\n{source_text[:8000]}"
     )
 
 
 def parse_quiz_json(content):
-    """Pull a clean list of question dicts out of a model's raw reply."""
     if not content:
         return []
     match = re.search(r"\[.*\]", content, re.DOTALL)
-    raw = match.group(0) if match else content
-    data = json.loads(raw)
-    quiz = []
+    data = json.loads(match.group(0) if match else content)
+    out = []
     for q in data:
-        quiz.append({
+        out.append({
             "question": str(q.get("question", "")).strip(),
-            "choices": [str(c) for c in q.get("choices", []) or []],
+            "choices": [str(c) for c in (q.get("choices") or [])],
             "answer": str(q.get("answer", "")).strip(),
             "explanation": str(q.get("explanation", "")).strip(),
         })
-    return quiz
+    return out
 
 
 def call_openai(api_key, prompt, model="gpt-4o-mini"):
@@ -75,11 +72,9 @@ def call_openai(api_key, prompt, model="gpt-4o-mini"):
     r = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}"},
-        json={"model": model,
-              "messages": [{"role": "user", "content": prompt}],
+        json={"model": model, "messages": [{"role": "user", "content": prompt}],
               "temperature": 0.4},
-        timeout=90,
-    )
+        timeout=90)
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"]
 
@@ -88,19 +83,16 @@ def call_anthropic(api_key, prompt, model="claude-3-5-sonnet-20241022"):
     import requests
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": api_key,
-                 "anthropic-version": "2023-06-01",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
         json={"model": model, "max_tokens": 2000,
               "messages": [{"role": "user", "content": prompt}]},
-        timeout=90,
-    )
+        timeout=90)
     r.raise_for_status()
     return r.json()["content"][0]["text"]
 
 
 def generate_quiz(api_key, provider, source_text, qtype, n):
-    """One swap point for the 'brain'. Returns list of question dicts."""
     prompt = build_quiz_prompt(source_text, qtype, n)
     content = (call_anthropic(api_key, prompt) if provider == "Anthropic"
                else call_openai(api_key, prompt))
@@ -114,46 +106,55 @@ def read_pdf_text(file_bytes):
 
 
 # ======================================================================
-#  LIFT: parse free-text workout notes + progressive overload (pure)
+#  LIFT: parsing + double progression  (pure/testable)
 # ======================================================================
 
-LOWER_KEYWORDS = [
-    "squat", "deadlift", "lunge", "leg press", "calf", "hip thrust",
-    "rdl", "romanian", "leg curl", "leg extension", "hack",
-]
+SMALL_ISO_KW = ["lateral raise", "rear delt", "fly", "flies", "reverse fly"]
+ISO_KW = ["curl", "extension", "pushdown", "raise", "row", "fly", "incline"]
+LOWER_KW = ["squat", "deadlift", "lunge", "rdl", "romanian", "leg press", "hip thrust"]
 
-# words to strip out of an exercise name so it reads cleanly
-FILLER = [
-    "to parallel", "full range", "slow down fast lift up", "slow down",
-    "fast lift up", "per side", "until slowing or", "reps", "rep",
-]
+# defaults per category: (rep_low, rep_high, load_increment, rep_step)
+# grounded in standard guidance: heavy compounds 4-6, isolation 8-12,
+# small delt/lateral work 12-15; add reps first, then load (double progression)
+CATEGORY_DEFAULTS = {
+    "compound_lower": (4, 6, 10.0, 1),
+    "compound_upper": (4, 6, 5.0, 1),
+    "isolation":      (8, 12, 5.0, 2),
+    "small_iso":      (12, 15, 2.5, 2),
+}
 
-# header lines that name a workout day
+FILLER = ["to parallel", "full range", "slow down fast lift up", "slow down",
+          "fast lift up", "per side", "until slowing or", "reps", "rep"]
 DAY_HINTS = ["training", "day", "session"]
 
 
-def classify_region(name):
-    """Lower body (legs/posterior chain) vs upper body, by keyword."""
-    n = name.lower()
-    return "lower" if any(k in n for k in LOWER_KEYWORDS) else "upper"
+def categorize(name, day=""):
+    n, d = name.lower(), day.lower()
+    if any(k in n for k in SMALL_ISO_KW):
+        return "small_iso"
+    if any(k in n for k in LOWER_KW):
+        return "compound_lower"
+    if ("accessory" in d or "aesthetic" in d or "dumbbell" in n
+            or any(k in n for k in ISO_KW)):
+        return "isolation"
+    return "compound_upper"
 
 
 def _clean_name(raw):
-    name = re.sub(r"\([^)]*\)", " ", raw)              # drop parentheticals
-    name = re.sub(r"^\s*\d+[.)]\s*", " ", name)         # leading list marker "1."
-    name = re.sub(r"\d+\s*sets?\s*of\s*\d*", " ", name, flags=re.I)  # "4 sets of 4"
+    name = re.sub(r"\([^)]*\)", " ", raw)
+    name = re.sub(r"^\s*\d+[.)]\s*", " ", name)
+    name = re.sub(r"\d+\s*sets?\s*of\s*\d*", " ", name, flags=re.I)
     name = re.sub(r"working sets?.*$", " ", name, flags=re.I)
     name = re.sub(r"\b\d+\s*(?:pounds|lbs)\b", " ", name, flags=re.I)
     for f in FILLER:
         name = re.sub(re.escape(f), " ", name, flags=re.I)
     name = re.sub(r"[~\-]", " ", name)
-    name = re.sub(r"^\s*\d+\s+", " ", name)            # any stray leading number
+    name = re.sub(r"^\s*\d+\s+", " ", name)
     name = re.sub(r"\s+", " ", name).strip(" .,")
     return name.title() if name else "Exercise"
 
 
 def _parse_reps(line, default_reps):
-    """Target reps from 'sets of 4' or '(until slowing or 6 reps)'."""
     paren = re.search(r"sets?\s*of\s*\(([^)]*)\)", line, flags=re.I)
     if paren:
         nums = re.findall(r"(\d+)\s*reps?", paren.group(1), flags=re.I)
@@ -166,7 +167,6 @@ def _parse_reps(line, default_reps):
 
 
 def _parse_weight(line):
-    """Working-set weight: number after 'working sets', else first lb value."""
     m = re.search(r"working sets?\s*~?\s*(\d+(?:\.\d+)?)", line, flags=re.I)
     if m:
         return float(m.group(1))
@@ -176,79 +176,82 @@ def _parse_weight(line):
     return None
 
 
-def parse_workout(text, default_reps=4):
-    """Parse free-text notes into a list of exercise dicts."""
-    exercises = []
+def parse_workout(text, default_reps=5):
+    """Parse notes into editable rows seeded with sensible per-lift defaults."""
+    rows = []
     day = "Workout"
     for line in text.splitlines():
         s = line.strip()
         if not s:
             continue
-        has_set = re.search(r"sets?\s*of", s, flags=re.I)
-        # day header: text line, no "sets of", mentions training/day
-        if not has_set:
+        if not re.search(r"sets?\s*of", s, flags=re.I):
             if any(h in s.lower() for h in DAY_HINTS) and len(s) < 60:
                 day = re.sub(r"[:\-]+$", "", s).strip()
             continue
         weight = _parse_weight(s)
         if weight is None:
-            continue  # warm-up-only or unparseable line
+            continue
         name = _clean_name(s)
-        exercises.append({
-            "day": day,
-            "name": name,
-            "reps": _parse_reps(s, default_reps),
-            "weight": weight,
-            "each": "each" in s.lower() or "per side" in s.lower(),
-            "region": classify_region(name),
+        cat = categorize(name, day)
+        low, high, inc, step = CATEGORY_DEFAULTS[cat]
+        rows.append({
+            "Day": day,
+            "Exercise": name,
+            "Type": cat,
+            "Weight": weight,
+            "Rep low": low,
+            "Rep high": high,
+            "Reps last": _parse_reps(s, default_reps),
+            "Hit all sets": True,
+            "Add (lbs)": inc,
+            "_rep_step": step,
         })
-    return exercises
+    return rows
 
 
-def next_weight(weight, region, hit, upper_inc, lower_inc):
-    """Linear progressive overload: add on success, hold on a miss."""
+def double_progression(weight, low, high, reps_last, hit, increment, rep_step):
+    """Standard double progression. Returns (next_weight, next_reps, action, note)."""
     if not hit:
-        return weight
-    return weight + (lower_inc if region == "lower" else upper_inc)
+        return weight, max(low, reps_last), "hold", "Missed last time. Repeat the same weight."
+    if reps_last >= high:
+        return round(weight + increment, 2), low, "add load", (
+            f"Hit the top ({high}). Add {increment:g} lb and reset to {low} reps.")
+    if reps_last < low:
+        return weight, low, "build", f"Below range. Aim for {low} reps at this weight."
+    nxt = min(reps_last + rep_step, high)
+    if nxt == reps_last:
+        return weight, nxt, "hold", "Already at the top. Push for a rep or add load."
+    return weight, nxt, "add reps", f"Add {nxt - reps_last} rep(s): aim for {nxt}."
 
 
-def build_next_session(exercises, missed_names, upper_inc=5.0, lower_inc=10.0):
-    """Return per-exercise recommendations for the next session."""
-    missed = set(missed_names or [])
+def recommend(rows):
     out = []
-    for ex in exercises:
-        hit = ex["name"] not in missed
-        nxt = next_weight(ex["weight"], ex["region"], hit, upper_inc, lower_inc)
-        out.append({
-            **ex,
-            "hit": hit,
-            "next_weight": nxt,
-            "delta": round(nxt - ex["weight"], 1),
-        })
+    for r in rows:
+        nw, nr, action, note = double_progression(
+            float(r["Weight"]), int(r["Rep low"]), int(r["Rep high"]),
+            int(r["Reps last"]), bool(r["Hit all sets"]),
+            float(r["Add (lbs)"]), int(r.get("_rep_step", 1)))
+        out.append({**r, "next_weight": nw, "next_reps": nr,
+                    "action": action, "note": note})
     return out
 
 
 def format_session_text(recs):
-    """A clean block the user can paste back into their Google Doc."""
     lines, day = [], None
     for r in recs:
-        if r["day"] != day:
-            day = r["day"]
+        if r["Day"] != day:
+            day = r["Day"]
             lines.append(f"\n{day}")
-        each = " each" if r["each"] else ""
-        change = (f"(+{r['delta']:g})" if r["delta"] > 0 else "(hold)")
-        lines.append(
-            f"- {r['name']}: 4 sets of {r['reps']}, "
-            f"working set {r['next_weight']:g} lbs{each} {change}"
-        )
+        lines.append(f"- {r['Exercise']}: {r['next_weight']:g} lb x "
+                     f"{r['next_reps']} reps  ({r['action']})")
     return "\n".join(lines).strip()
 
 
 SAMPLE_NOTES = """Strength Training
-1. 4 sets of 4 to parallel back squats (1st and 2nd set lighter weight, working sets 325 pounds)
-2. 4 sets of 4 full range bench press (1st and 2nd set lighter weight, working sets 175 pounds)
-3. 4 sets of 4 full range deadlifts (1st set and 2nd lighter weight, working sets 335 pounds)
-4. 4 sets of 4 full range wide grip pull ups (1st and 2nd set lighter weight, working sets 90 pounds)
+1. 4 sets of 4 to parallel back squats (working sets 325 pounds)
+2. 4 sets of 4 full range bench press (working sets 175 pounds)
+3. 4 sets of 4 full range deadlifts (working sets 335 pounds)
+4. 4 sets of 4 full range wide grip pull ups (working sets 90 pounds)
 
 Power Training
 1. 4 sets of (until slowing or 6 reps) to parallel back squats (working sets 235 pounds)
@@ -269,8 +272,21 @@ Accessory / Aesthetic Day (Dumbbells)
 #  Streamlit UI
 # ======================================================================
 
+def _resolve_key(provider, ui_key):
+    """Prefer a key set in app settings (st.secrets); fall back to UI input."""
+    import streamlit as st
+    if ui_key:
+        return ui_key
+    name = "ANTHROPIC_API_KEY" if provider == "Anthropic" else "OPENAI_API_KEY"
+    try:
+        return st.secrets.get(name, "")
+    except Exception:
+        return ""
+
+
 def main():
     import streamlit as st
+    import pandas as pd
 
     st.set_page_config(page_title="Coursework & Lift Tracker", page_icon="📚",
                        layout="centered")
@@ -281,21 +297,29 @@ def main():
     # ----------------------------- STUDY -----------------------------
     with study_tab:
         st.subheader("Generate a practice test from your notes")
+        provider = st.selectbox("Model provider", ["OpenAI", "Anthropic"])
 
-        c1, c2 = st.columns(2)
-        provider = c1.selectbox("Model provider", ["OpenAI", "Anthropic"])
-        api_key = c2.text_input("API key", type="password",
-                                placeholder="sk-... or anthropic key")
+        configured = _resolve_key(provider, "")
+        if configured:
+            st.caption("✓ Using the API key set in this app's settings. "
+                       "No key needed.")
+            ui_key = ""
+        else:
+            ui_key = st.text_input(
+                "API key", type="password",
+                help="Tip: set OPENAI_API_KEY or ANTHROPIC_API_KEY in the "
+                     "app's Secrets so you never type this again.")
 
         pdf = st.file_uploader("Lecture notes / textbook PDF", type=["pdf"])
-        pasted = st.text_area("...or paste your notes here", height=160)
+        pasted = st.text_area("...or paste your notes here", height=150)
 
-        c3, c4 = st.columns(2)
-        qtype = c3.radio("Question type",
-                         ["Multiple choice", "Short answer"], horizontal=True)
-        n = c4.slider("How many questions", 3, 15, 6)
+        c1, c2 = st.columns(2)
+        qtype = c1.radio("Question type", ["Multiple choice", "Short answer"],
+                         horizontal=True)
+        n = c2.slider("How many questions", 3, 15, 6)
 
         if st.button("Generate practice test", type="primary"):
+            key = _resolve_key(provider, ui_key)
             source = ""
             if pdf:
                 try:
@@ -304,16 +328,15 @@ def main():
                     st.error(f"Could not read PDF: {e}")
             if pasted.strip():
                 source += "\n" + pasted
-
             if len(source.strip()) < 40:
                 st.warning("Add a PDF or paste more text to quiz from.")
-            elif not api_key:
-                st.warning("Enter an API key to generate questions.")
+            elif not key:
+                st.warning("No API key available. Add one in app settings or above.")
             else:
                 with st.spinner("Writing your quiz..."):
                     try:
-                        quiz = generate_quiz(api_key, provider, source, qtype, n)
-                        st.session_state["quiz"] = quiz
+                        st.session_state["quiz"] = generate_quiz(
+                            key, provider, source, qtype, int(n))
                         st.session_state["quiz_type"] = qtype
                     except Exception as e:
                         st.error(f"Generation failed: {e}")
@@ -335,55 +358,59 @@ def main():
                     st.success(q["answer"])
                     if q["explanation"]:
                         st.caption(q["explanation"])
-                st.markdown("")
             if st.button("Clear test"):
                 st.session_state.pop("quiz", None)
                 st.rerun()
 
     # ----------------------------- LIFT ------------------------------
     with lift_tab:
-        st.subheader("Compute next session from your notes")
-        st.caption("Paste your workout notes exactly how you keep them. "
-                   "The parser reads the working-set weights and reps.")
+        st.subheader("Next session by double progression")
+        st.caption("Paste your notes, set how many reps you actually hit last "
+                   "time, and the app tells you whether to add reps or add "
+                   "load. Add reps inside the range first, then weight at the top.")
 
-        notes = st.text_area("Your workout notes", value=SAMPLE_NOTES,
-                             height=240)
+        with st.expander("How the progression works"):
+            st.markdown(
+                "- **Double progression:** keep the weight and add reps until "
+                "you reach the top of the range, then add load and drop back "
+                "to the bottom of the range.\n"
+                "- **Defaults by lift type** (editable per row): heavy "
+                "compounds 4-6 reps, isolation 8-12, small delt/lateral work "
+                "12-15. Load jumps: +10 lb lower compounds, +5 lb upper "
+                "compounds and isolation, +2.5 lb small isolation.\n"
+                "- **Uncheck 'Hit all sets'** for anything you missed and it "
+                "holds the weight. Nothing auto-progresses.")
 
-        c1, c2, c3 = st.columns(3)
-        upper_inc = c1.number_input("Upper-body add (lbs)", 0.0, 50.0, 5.0)
-        lower_inc = c2.number_input("Lower-body add (lbs)", 0.0, 50.0, 10.0)
-        default_reps = c3.number_input("Default target reps", 1, 20, 4,
-                                       help="Used only if a line has no rep "
-                                            "number. Your 4-6 range is read "
-                                            "per exercise.")
+        notes = st.text_area("Your workout notes", value=SAMPLE_NOTES, height=200)
+        rows = parse_workout(notes) if notes.strip() else []
 
-        exercises = parse_workout(notes, int(default_reps)) if notes.strip() else []
-
-        if not exercises:
-            st.info("Paste notes with lines like "
-                    "'4 sets of 4 bench press (working sets 175 pounds)'.")
+        if not rows:
+            st.info("Paste lines like '4 sets of 4 bench press (working sets 175 pounds)'.")
         else:
-            names = [e["name"] for e in exercises]
-            missed = st.multiselect(
-                "Mark any lifts you MISSED last time (these hold weight)",
-                names, default=[],
-                help="Everything not selected is treated as hit -> progress.")
+            df = pd.DataFrame(rows)
+            display_cols = ["Day", "Exercise", "Type", "Weight", "Rep low",
+                            "Rep high", "Reps last", "Hit all sets", "Add (lbs)"]
+            edited = st.data_editor(
+                df[display_cols], use_container_width=True, hide_index=True,
+                disabled=["Day", "Exercise", "Type"], key="lift_editor")
 
-            recs = build_next_session(exercises, missed,
-                                      float(upper_inc), float(lower_inc))
+            # carry the hidden rep-step back in by exercise name
+            step_by_name = {r["Exercise"]: r["_rep_step"] for r in rows}
+            merged = edited.to_dict("records")
+            for m in merged:
+                m["_rep_step"] = step_by_name.get(m["Exercise"], 1)
 
-            st.markdown("### Next session targets")
+            recs = recommend(merged)
+            st.markdown("### Next session")
             day = None
+            icon = {"add load": "🔼", "add reps": "🟢", "build": "🔧", "hold": "⚪"}
             for r in recs:
-                if r["day"] != day:
-                    day = r["day"]
+                if r["Day"] != day:
+                    day = r["Day"]
                     st.markdown(f"**{day}**")
-                tag = "🟢" if r["delta"] > 0 else "⚪"
-                each = " each" if r["each"] else ""
-                change = f"  (+{r['delta']:g})" if r["delta"] > 0 else "  (hold)"
-                st.write(f"{tag} **{r['name']}** "
-                         f"({r['region']}): {r['next_weight']:g} lbs{each} "
-                         f"for 4x{r['reps']}{change}")
+                st.write(f"{icon.get(r['action'], '•')} **{r['Exercise']}**: "
+                         f"{r['next_weight']:g} lb x {r['next_reps']} reps")
+                st.caption(r["note"])
 
             st.markdown("---")
             st.markdown("**Copy back into your notes:**")

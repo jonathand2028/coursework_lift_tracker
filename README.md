@@ -67,19 +67,37 @@ streamlit run app.py
 Then open the local URL Streamlit prints (usually http://localhost:8501).
 
 ### Study tab
-Pick a provider (OpenAI or Anthropic), paste your API key, then upload a PDF
-or paste lecture notes. Choose multiple-choice or short-answer and a question
-count, and the app calls the model to generate a practice test with a
-flashcard-style reveal for each answer. The key is entered in the UI and is
-not stored.
+Pick a provider (OpenAI or Anthropic), upload a PDF or paste lecture notes,
+choose multiple-choice or short-answer and a question count, and the app calls
+the model to generate a practice test with a flashcard-style reveal for each
+answer.
+
+The API key is read from the app's settings (Streamlit Secrets), so as the
+owner you set it once and end users never type a key. To set it: in the
+Streamlit Cloud dashboard open your app -> Settings -> Secrets and add
+`OPENAI_API_KEY = "sk-..."` (or `ANTHROPIC_API_KEY = "..."`). Running locally,
+put the same line in `.streamlit/secrets.toml`. If no key is configured, the
+app falls back to a manual key box.
 
 ### Lift tab
 Paste your workout notes the way you keep them in your Google Doc (the app
-ships with your format pre-filled as an example). It reads the working-set
-weights and reps, applies linear progressive overload (hit target -> add
-weight; miss -> hold), and prints next-session targets you can copy straight
-back into your notes. Defaults: +5 lbs upper body, +10 lbs lower body, all
-adjustable in the UI. Mark any lifts you missed and those hold their weight.
+ships with your format pre-filled as an example). It reads your weights and
+reps into an editable table, then recommends the next session using **double
+progression**, the standard method: add reps inside a target range first, then
+add load once you hit the top of the range.
+
+Defaults are set by lift type and follow standard strength guidance (NSCA):
+heavy compounds 4-6 reps, isolation 8-12, small delt/lateral work 12-15. Load
+jumps default to +10 lb lower compounds, +5 lb upper compounds and isolation,
++2.5 lb small isolation. Everything is editable per row. Enter the reps you
+actually hit last time; uncheck "Hit all sets" for anything you missed and it
+holds the weight. Nothing auto-progresses. The result includes a copy-paste
+block for your notes.
+
+Rep-range guidance: NSCA resistance-training standards via
+https://www.ptpioneer.com/personal-training/certifications/nsca-cpt/nsca-cpt-chapter-15/
+and the double-progression method
+https://legionathletics.com/double-progression/
 
 ## Deploy to a dev website (Streamlit Community Cloud)
 
@@ -87,5 +105,7 @@ adjustable in the UI. Mark any lifts you missed and those hold their weight.
 2. Go to https://share.streamlit.io and sign in with GitHub.
 3. Click "New app", pick this repo, branch `main`, main file `app.py`.
 4. Click "Deploy". The app builds from `requirements.txt` and gets a public
-   `*.streamlit.app` URL you can share. (Enter your model API key in the app
-   UI at runtime; no secrets configuration required.)
+   `*.streamlit.app` URL you can share.
+5. Open Settings -> Secrets and add your model key, e.g.
+   `OPENAI_API_KEY = "sk-..."`, so the Study tab works without anyone typing
+   a key.
