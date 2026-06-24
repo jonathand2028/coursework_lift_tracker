@@ -54,3 +54,38 @@ The riskiest assumption is that the AI can actually do this well with my real ma
 4. Run both in one chat to make sure it can handle the combination.
 
 **How I will know it passed:** if the quizzes are worth studying and the workout targets are correct, the hard part is done and building the app is mostly connecting the pieces. If not, I fix the prompts or inputs before spending a weekend coding.
+
+---
+
+## Running this MVP
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Then open the local URL Streamlit prints (usually http://localhost:8501).
+
+### Study tab
+Pick a provider (OpenAI or Anthropic), paste your API key, then upload a PDF
+or paste lecture notes. Choose multiple-choice or short-answer and a question
+count, and the app calls the model to generate a practice test with a
+flashcard-style reveal for each answer. The key is entered in the UI and is
+not stored.
+
+### Lift tab
+Paste your workout notes the way you keep them in your Google Doc (the app
+ships with your format pre-filled as an example). It reads the working-set
+weights and reps, applies linear progressive overload (hit target -> add
+weight; miss -> hold), and prints next-session targets you can copy straight
+back into your notes. Defaults: +5 lbs upper body, +10 lbs lower body, all
+adjustable in the UI. Mark any lifts you missed and those hold their weight.
+
+## Deploy to a dev website (Streamlit Community Cloud)
+
+1. Push this repo to GitHub.
+2. Go to https://share.streamlit.io and sign in with GitHub.
+3. Click "New app", pick this repo, branch `main`, main file `app.py`.
+4. Click "Deploy". The app builds from `requirements.txt` and gets a public
+   `*.streamlit.app` URL you can share. (Enter your model API key in the app
+   UI at runtime; no secrets configuration required.)

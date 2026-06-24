@@ -1,222 +1,268 @@
 """
-Coursework & Lift Tracker - Streamlit MVP
-=========================================
+Coursework & Lift Tracker - Streamlit MVP (iteration 2)
+=======================================================
 
-One small app, two jobs, one user (you):
+Two tools, one user (you):
 
-  STUDY:  read a syllabus / textbook PDF and generate short quizzes for a
-          chosen topic.
-  LIFT:   read a workout history (CSV) and compute the exact targets for the
-          next session using a simple progressive-overload rule.
+  STUDY (Tab 1):  paste lecture notes or upload a PDF, and generate a real
+                  multiple-choice / short-answer practice test using an LLM
+                  (OpenAI or Anthropic). Clean flashcard-style review UI.
 
-The AI that writes quiz questions is kept BEHIND ONE FUNCTION
-(`generate_quiz`) so it can be swapped out. If you provide an OpenAI-style
-API key it uses a real model; if not, it falls back to a built-in
-question generator so the app always works offline.
+  LIFT  (Tab 2):  paste your workout notes the way you actually keep them in
+                  a Google Doc. The app parses them, applies linear
+                  progressive overload (hit target -> add weight; miss ->
+                  hold), and prints your exact targets for next session,
+                  ready to paste back into your notes.
 
 Run it:
-    pip install streamlit pandas pypdf requests
+    pip install -r requirements.txt
     streamlit run app.py
 
-The progression math and the offline quiz generator are plain Python at the
-top of the file with no Streamlit dependency, so they can be unit-tested.
+The parsing and progression logic at the top of this file is plain Python
+with no Streamlit dependency, so it can be unit-tested on its own.
 """
 
 import io
 import re
 import json
-import random
-from datetime import datetime
+
+# ======================================================================
+#  STUDY: prompt building + LLM calls + response parsing  (pure/testable)
+# ======================================================================
+
+def build_quiz_prompt(source_text, qtype, n):
+    """Return the instruction sent to the model. Asks for strict JSON."""
+    if qtype == "Multiple choice":
+        shape = (
+            'a JSON array of objects, each: '
+            '{"question": str, "choices": [4 strings], '
+            '"answer": "the exact correct choice", "explanation": str}'
+        )
+    else:
+        shape = (
+            'a JSON array of objects, each: '
+            '{"question": str, "choices": [], '
+            '"answer": str, "explanation": str}'
+        )
+    return (
+        f"You are a study-quiz generator. Using ONLY the material below, "
+        f"write {n} {qtype.lower()} questions that test understanding of the "
+        f"key concepts. Return {shape}. Return JSON only, no prose.\n\n"
+        f"MATERIAL:\n{source_text[:8000]}"
+    )
+
+
+def parse_quiz_json(content):
+    """Pull a clean list of question dicts out of a model's raw reply."""
+    if not content:
+        return []
+    match = re.search(r"\[.*\]", content, re.DOTALL)
+    raw = match.group(0) if match else content
+    data = json.loads(raw)
+    quiz = []
+    for q in data:
+        quiz.append({
+            "question": str(q.get("question", "")).strip(),
+            "choices": [str(c) for c in q.get("choices", []) or []],
+            "answer": str(q.get("answer", "")).strip(),
+            "explanation": str(q.get("explanation", "")).strip(),
+        })
+    return quiz
+
+
+def call_openai(api_key, prompt, model="gpt-4o-mini"):
+    import requests
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={"model": model,
+              "messages": [{"role": "user", "content": prompt}],
+              "temperature": 0.4},
+        timeout=90,
+    )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
+
+
+def call_anthropic(api_key, prompt, model="claude-3-5-sonnet-20241022"):
+    import requests
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": api_key,
+                 "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": model, "max_tokens": 2000,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=90,
+    )
+    r.raise_for_status()
+    return r.json()["content"][0]["text"]
+
+
+def generate_quiz(api_key, provider, source_text, qtype, n):
+    """One swap point for the 'brain'. Returns list of question dicts."""
+    prompt = build_quiz_prompt(source_text, qtype, n)
+    content = (call_anthropic(api_key, prompt) if provider == "Anthropic"
+               else call_openai(api_key, prompt))
+    return parse_quiz_json(content)
+
+
+def read_pdf_text(file_bytes):
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(file_bytes))
+    return "\n".join((p.extract_text() or "") for p in reader.pages)
 
 
 # ======================================================================
-#  LIFT:  progressive-overload logic  (pure, testable)
+#  LIFT: parse free-text workout notes + progressive overload (pure)
 # ======================================================================
 
-def _is_success(reps, sets, target_reps, target_sets):
-    """A session 'succeeds' when you hit the target reps on every target set."""
-    return reps >= target_reps and sets >= target_sets
+LOWER_KEYWORDS = [
+    "squat", "deadlift", "lunge", "leg press", "calf", "hip thrust",
+    "rdl", "romanian", "leg curl", "leg extension", "hack",
+]
+
+# words to strip out of an exercise name so it reads cleanly
+FILLER = [
+    "to parallel", "full range", "slow down fast lift up", "slow down",
+    "fast lift up", "per side", "until slowing or", "reps", "rep",
+]
+
+# header lines that name a workout day
+DAY_HINTS = ["training", "day", "session"]
 
 
-def next_targets(rows, target_reps=5, target_sets=5, increment=5.0,
-                 deload_factor=0.9, stall_limit=2):
-    """Compute the next session per exercise.
+def classify_region(name):
+    """Lower body (legs/posterior chain) vs upper body, by keyword."""
+    n = name.lower()
+    return "lower" if any(k in n for k in LOWER_KEYWORDS) else "upper"
 
-    `rows` is a list of dicts: {date, exercise, weight, reps, sets}.
-    Returns a list of recommendation dicts, one per exercise.
 
-    Rule:
-      - If your most recent session hit the target -> add `increment`.
-      - If you missed, that is a 'stall'. After `stall_limit` stalls in a
-        row -> deload (multiply weight by `deload_factor`) and reset.
-    """
-    # group by exercise, keep chronological order
-    by_ex = {}
-    for r in sorted(rows, key=lambda x: str(x.get("date", ""))):
-        by_ex.setdefault(r["exercise"], []).append(r)
+def _clean_name(raw):
+    name = re.sub(r"\([^)]*\)", " ", raw)              # drop parentheticals
+    name = re.sub(r"^\s*\d+[.)]\s*", " ", name)         # leading list marker "1."
+    name = re.sub(r"\d+\s*sets?\s*of\s*\d*", " ", name, flags=re.I)  # "4 sets of 4"
+    name = re.sub(r"working sets?.*$", " ", name, flags=re.I)
+    name = re.sub(r"\b\d+\s*(?:pounds|lbs)\b", " ", name, flags=re.I)
+    for f in FILLER:
+        name = re.sub(re.escape(f), " ", name, flags=re.I)
+    name = re.sub(r"[~\-]", " ", name)
+    name = re.sub(r"^\s*\d+\s+", " ", name)            # any stray leading number
+    name = re.sub(r"\s+", " ", name).strip(" .,")
+    return name.title() if name else "Exercise"
 
+
+def _parse_reps(line, default_reps):
+    """Target reps from 'sets of 4' or '(until slowing or 6 reps)'."""
+    paren = re.search(r"sets?\s*of\s*\(([^)]*)\)", line, flags=re.I)
+    if paren:
+        nums = re.findall(r"(\d+)\s*reps?", paren.group(1), flags=re.I)
+        if nums:
+            return int(nums[-1])
+    plain = re.search(r"sets?\s*of\s*(\d+)", line, flags=re.I)
+    if plain:
+        return int(plain.group(1))
+    return default_reps
+
+
+def _parse_weight(line):
+    """Working-set weight: number after 'working sets', else first lb value."""
+    m = re.search(r"working sets?\s*~?\s*(\d+(?:\.\d+)?)", line, flags=re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"~?\s*(\d+(?:\.\d+)?)\s*(?:pounds|lbs)", line, flags=re.I)
+    if m:
+        return float(m.group(1))
+    return None
+
+
+def parse_workout(text, default_reps=4):
+    """Parse free-text notes into a list of exercise dicts."""
+    exercises = []
+    day = "Workout"
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        has_set = re.search(r"sets?\s*of", s, flags=re.I)
+        # day header: text line, no "sets of", mentions training/day
+        if not has_set:
+            if any(h in s.lower() for h in DAY_HINTS) and len(s) < 60:
+                day = re.sub(r"[:\-]+$", "", s).strip()
+            continue
+        weight = _parse_weight(s)
+        if weight is None:
+            continue  # warm-up-only or unparseable line
+        name = _clean_name(s)
+        exercises.append({
+            "day": day,
+            "name": name,
+            "reps": _parse_reps(s, default_reps),
+            "weight": weight,
+            "each": "each" in s.lower() or "per side" in s.lower(),
+            "region": classify_region(name),
+        })
+    return exercises
+
+
+def next_weight(weight, region, hit, upper_inc, lower_inc):
+    """Linear progressive overload: add on success, hold on a miss."""
+    if not hit:
+        return weight
+    return weight + (lower_inc if region == "lower" else upper_inc)
+
+
+def build_next_session(exercises, missed_names, upper_inc=5.0, lower_inc=10.0):
+    """Return per-exercise recommendations for the next session."""
+    missed = set(missed_names or [])
     out = []
-    for exercise, history in by_ex.items():
-        last = history[-1]
-        last_weight = float(last["weight"])
-        reps = int(last["reps"])
-        sets = int(last["sets"])
-
-        # count consecutive stalls ending at the most recent session
-        stalls = 0
-        for r in reversed(history):
-            if _is_success(int(r["reps"]), int(r["sets"]), target_reps, target_sets):
-                break
-            stalls += 1
-
-        if _is_success(reps, sets, target_reps, target_sets):
-            rec_weight = last_weight + increment
-            action = "progress"
-            note = f"Hit {reps}x{sets}. Add {increment:g} and go again."
-        elif stalls >= stall_limit:
-            rec_weight = round(last_weight * deload_factor, 1)
-            action = "deload"
-            note = (f"Stalled {stalls} times. Deload to "
-                    f"{rec_weight:g} and rebuild.")
-        else:
-            rec_weight = last_weight
-            action = "repeat"
-            note = (f"Missed target ({reps}x{sets}). Repeat "
-                    f"{last_weight:g} until you hit {target_reps}x{target_sets}.")
-
+    for ex in exercises:
+        hit = ex["name"] not in missed
+        nxt = next_weight(ex["weight"], ex["region"], hit, upper_inc, lower_inc)
         out.append({
-            "exercise": exercise,
-            "last_weight": last_weight,
-            "last_result": f"{reps} reps x {sets} sets",
-            "next_weight": rec_weight,
-            "next_scheme": f"{target_sets} x {target_reps}",
-            "action": action,
-            "note": note,
+            **ex,
+            "hit": hit,
+            "next_weight": nxt,
+            "delta": round(nxt - ex["weight"], 1),
         })
     return out
 
 
-def parse_workout_csv(text):
-    """Parse a CSV string into row dicts. Expects headers:
-    date, exercise, weight, reps, sets (case-insensitive)."""
-    import csv
-    rows = []
-    reader = csv.DictReader(io.StringIO(text))
-    norm = {h: h.strip().lower() for h in (reader.fieldnames or [])}
-    for raw in reader:
-        row = {norm.get(k, k): v for k, v in raw.items()}
-        try:
-            rows.append({
-                "date": row.get("date", ""),
-                "exercise": row.get("exercise", "").strip(),
-                "weight": float(row.get("weight", 0)),
-                "reps": int(float(row.get("reps", 0))),
-                "sets": int(float(row.get("sets", 0))),
-            })
-        except (ValueError, TypeError):
-            continue
-    return rows
+def format_session_text(recs):
+    """A clean block the user can paste back into their Google Doc."""
+    lines, day = [], None
+    for r in recs:
+        if r["day"] != day:
+            day = r["day"]
+            lines.append(f"\n{day}")
+        each = " each" if r["each"] else ""
+        change = (f"(+{r['delta']:g})" if r["delta"] > 0 else "(hold)")
+        lines.append(
+            f"- {r['name']}: 4 sets of {r['reps']}, "
+            f"working set {r['next_weight']:g} lbs{each} {change}"
+        )
+    return "\n".join(lines).strip()
 
 
-SAMPLE_WORKOUT_CSV = """date,exercise,weight,reps,sets
-2026-06-01,Squat,185,5,5
-2026-06-01,Bench,135,5,5
-2026-06-03,Squat,190,5,5
-2026-06-03,Bench,140,4,5
-2026-06-05,Squat,195,5,5
-2026-06-05,Bench,140,4,5
+SAMPLE_NOTES = """Strength Training
+1. 4 sets of 4 to parallel back squats (1st and 2nd set lighter weight, working sets 325 pounds)
+2. 4 sets of 4 full range bench press (1st and 2nd set lighter weight, working sets 175 pounds)
+3. 4 sets of 4 full range deadlifts (1st set and 2nd lighter weight, working sets 335 pounds)
+4. 4 sets of 4 full range wide grip pull ups (1st and 2nd set lighter weight, working sets 90 pounds)
+
+Power Training
+1. 4 sets of (until slowing or 6 reps) to parallel back squats (working sets 235 pounds)
+2. 4 sets of (until slowing or 4 reps) full range bench press (working sets 145 pounds)
+3. 4 sets of (until slowing or 6 reps) full range deadlifts (working sets 275 pounds)
+4. 4 sets of (until slowing or 6 reps) full range wide grip pull ups (working sets 35 pounds)
+
+Accessory / Aesthetic Day (Dumbbells)
+1. 4 sets of 9 incline dumbbell press (working sets ~60 lbs each)
+2. 4 sets of 9 one-arm dumbbell row per side (working sets ~70 lbs)
+3. 4 sets of 12 lateral raises (working sets ~22.5 lbs each)
+4. 4 sets of 12 dumbbell biceps curls (working sets ~35 lbs each)
+5. 4 sets of 15 rear delt flies (working sets ~15 lbs each)
 """
-
-
-# ======================================================================
-#  STUDY:  quiz generation  (offline fallback is pure + testable)
-# ======================================================================
-
-_STOPWORDS = set("""
-the a an and or of to in on for with is are was were be been being this that
-these those as at by from it its into will shall can may your you we our their
-""".split())
-
-
-def generate_quiz_offline(text, topic="", n=5):
-    """Build simple recall questions from source text, no API needed.
-
-    Strategy: find informative sentences (optionally about `topic`), then turn
-    each into a fill-in-the-blank by hiding its most distinctive keyword.
-    """
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.strip()) > 40]
-    if topic:
-        t = topic.lower()
-        focused = [s for s in sentences if t in s.lower()]
-        sentences = focused or sentences
-
-    random.shuffle(sentences)
-    quiz = []
-    for s in sentences:
-        words = re.findall(r"[A-Za-z][A-Za-z\-]{3,}", s)
-        candidates = [w for w in words if w.lower() not in _STOPWORDS]
-        if not candidates:
-            continue
-        # pick the longest word as the "key term" to blank out
-        answer = max(candidates, key=len)
-        blanked = re.sub(r"\b" + re.escape(answer) + r"\b",
-                         "______", s, count=1)
-        quiz.append({
-            "question": blanked,
-            "answer": answer,
-            "type": "fill-in-the-blank",
-        })
-        if len(quiz) >= n:
-            break
-    return quiz
-
-
-def generate_quiz(text, topic="", n=5, api_key="", model="gpt-4o-mini",
-                  base_url="https://api.openai.com/v1"):
-    """Single swap point for the 'brain'.
-
-    With an API key: ask a real model for a richer quiz.
-    Without one: fall back to the offline generator above.
-    Returns a list of {question, answer, type}.
-    """
-    if not api_key:
-        return generate_quiz_offline(text, topic, n)
-
-    try:
-        import requests
-        prompt = (
-            f"Create a {n}-question short-answer quiz to help a student study "
-            f"the topic '{topic or 'this material'}'. Base it ONLY on the text "
-            f"below. Return JSON: a list of objects with 'question' and "
-            f"'answer'.\n\nTEXT:\n{text[:6000]}"
-        )
-        resp = requests.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
-        match = re.search(r"\[.*\]", content, re.DOTALL)
-        data = json.loads(match.group(0) if match else content)
-        return [{"question": q.get("question", ""),
-                 "answer": q.get("answer", ""),
-                 "type": "short-answer"} for q in data][:n]
-    except Exception:
-        # Never let the model break the app - fall back gracefully.
-        return generate_quiz_offline(text, topic, n)
-
-
-def read_pdf_text(file_bytes):
-    """Extract text from a syllabus/textbook PDF."""
-    from pypdf import PdfReader
-    reader = PdfReader(io.BytesIO(file_bytes))
-    return "\n".join((p.extract_text() or "") for p in reader.pages)
 
 
 # ======================================================================
@@ -225,94 +271,123 @@ def read_pdf_text(file_bytes):
 
 def main():
     import streamlit as st
-    import pandas as pd
 
     st.set_page_config(page_title="Coursework & Lift Tracker", page_icon="📚",
                        layout="centered")
     st.title("Coursework & Lift Tracker")
 
-    with st.sidebar:
-        st.header("Quiz brain (optional)")
-        api_key = st.text_input("API key", type="password",
-                                help="Leave blank to use the built-in offline "
-                                     "quiz generator.")
-        st.caption("With a key, quizzes use a real model. Without one, the app "
-                   "still works using a simple built-in generator.")
-
     study_tab, lift_tab = st.tabs(["📚 Study", "🏋️ Lift"])
 
-    # ---------------- STUDY ----------------
+    # ----------------------------- STUDY -----------------------------
     with study_tab:
-        st.subheader("Generate a quiz from your course material")
-        pdf = st.file_uploader("Syllabus or textbook PDF", type=["pdf"],
-                               key="study_pdf")
-        pasted = st.text_area("...or paste material here", height=140)
-        col1, col2 = st.columns(2)
-        topic = col1.text_input("Topic / week (optional)",
-                                placeholder="e.g. supply and demand")
-        n = col2.number_input("Questions", 1, 15, 5)
+        st.subheader("Generate a practice test from your notes")
 
-        if st.button("Generate quiz", type="primary"):
-            text = ""
+        c1, c2 = st.columns(2)
+        provider = c1.selectbox("Model provider", ["OpenAI", "Anthropic"])
+        api_key = c2.text_input("API key", type="password",
+                                placeholder="sk-... or anthropic key")
+
+        pdf = st.file_uploader("Lecture notes / textbook PDF", type=["pdf"])
+        pasted = st.text_area("...or paste your notes here", height=160)
+
+        c3, c4 = st.columns(2)
+        qtype = c3.radio("Question type",
+                         ["Multiple choice", "Short answer"], horizontal=True)
+        n = c4.slider("How many questions", 3, 15, 6)
+
+        if st.button("Generate practice test", type="primary"):
+            source = ""
             if pdf:
                 try:
-                    text = read_pdf_text(pdf.read())
+                    source = read_pdf_text(pdf.read())
                 except Exception as e:
                     st.error(f"Could not read PDF: {e}")
             if pasted.strip():
-                text += "\n" + pasted
-            if len(text.strip()) < 40:
-                st.warning("Add a PDF or paste more text to quiz from.")
-            else:
-                quiz = generate_quiz(text, topic, int(n), api_key=api_key)
-                if not quiz:
-                    st.warning("Could not build questions from this text.")
-                for i, q in enumerate(quiz, 1):
-                    st.markdown(f"**{i}. {q['question']}**")
-                    with st.expander("Show answer"):
-                        st.write(q["answer"])
+                source += "\n" + pasted
 
-    # ---------------- LIFT ----------------
+            if len(source.strip()) < 40:
+                st.warning("Add a PDF or paste more text to quiz from.")
+            elif not api_key:
+                st.warning("Enter an API key to generate questions.")
+            else:
+                with st.spinner("Writing your quiz..."):
+                    try:
+                        quiz = generate_quiz(api_key, provider, source, qtype, n)
+                        st.session_state["quiz"] = quiz
+                        st.session_state["quiz_type"] = qtype
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+
+        quiz = st.session_state.get("quiz")
+        if quiz:
+            st.markdown("---")
+            st.markdown("### Practice Test")
+            mc = st.session_state.get("quiz_type") == "Multiple choice"
+            for i, q in enumerate(quiz, 1):
+                st.markdown(f"**{i}. {q['question']}**")
+                if mc and q["choices"]:
+                    st.radio("Choose:", q["choices"], key=f"ans_{i}",
+                             index=None, label_visibility="collapsed")
+                else:
+                    st.text_input("Your answer", key=f"ans_{i}",
+                                  label_visibility="collapsed")
+                with st.expander("Show answer"):
+                    st.success(q["answer"])
+                    if q["explanation"]:
+                        st.caption(q["explanation"])
+                st.markdown("")
+            if st.button("Clear test"):
+                st.session_state.pop("quiz", None)
+                st.rerun()
+
+    # ----------------------------- LIFT ------------------------------
     with lift_tab:
-        st.subheader("Compute your next session")
-        st.caption("CSV columns: date, exercise, weight, reps, sets")
-        csv_file = st.file_uploader("Workout history CSV", type=["csv"],
-                                    key="lift_csv")
-        use_sample = st.checkbox("Use sample data", value=not bool(csv_file))
+        st.subheader("Compute next session from your notes")
+        st.caption("Paste your workout notes exactly how you keep them. "
+                   "The parser reads the working-set weights and reps.")
+
+        notes = st.text_area("Your workout notes", value=SAMPLE_NOTES,
+                             height=240)
 
         c1, c2, c3 = st.columns(3)
-        target_reps = c1.number_input("Target reps", 1, 20, 5)
-        target_sets = c2.number_input("Target sets", 1, 10, 5)
-        increment = c3.number_input("Add (lbs)", 1.0, 50.0, 5.0)
+        upper_inc = c1.number_input("Upper-body add (lbs)", 0.0, 50.0, 5.0)
+        lower_inc = c2.number_input("Lower-body add (lbs)", 0.0, 50.0, 10.0)
+        default_reps = c3.number_input("Default target reps", 1, 20, 4,
+                                       help="Used only if a line has no rep "
+                                            "number. Your 4-6 range is read "
+                                            "per exercise.")
 
-        text = None
-        if csv_file and not use_sample:
-            text = csv_file.read().decode("utf-8", errors="ignore")
-        elif use_sample:
-            text = SAMPLE_WORKOUT_CSV
-            with st.expander("Sample data"):
-                st.code(SAMPLE_WORKOUT_CSV)
+        exercises = parse_workout(notes, int(default_reps)) if notes.strip() else []
 
-        if text:
-            rows = parse_workout_csv(text)
-            if not rows:
-                st.warning("No valid rows found. Check the column names.")
-            else:
-                recs = next_targets(rows, int(target_reps), int(target_sets),
-                                    float(increment))
-                st.markdown("### Next session")
-                badge = {"progress": "🟢", "repeat": "🟡", "deload": "🔵"}
-                for r in recs:
-                    st.markdown(
-                        f"{badge.get(r['action'], '')} **{r['exercise']}**: "
-                        f"{r['next_weight']:g} lbs for {r['next_scheme']}"
-                    )
-                    st.caption(r["note"])
-                st.markdown("---")
-                st.dataframe(pd.DataFrame(recs)[
-                    ["exercise", "last_weight", "last_result",
-                     "next_weight", "next_scheme", "action"]
-                ], use_container_width=True)
+        if not exercises:
+            st.info("Paste notes with lines like "
+                    "'4 sets of 4 bench press (working sets 175 pounds)'.")
+        else:
+            names = [e["name"] for e in exercises]
+            missed = st.multiselect(
+                "Mark any lifts you MISSED last time (these hold weight)",
+                names, default=[],
+                help="Everything not selected is treated as hit -> progress.")
+
+            recs = build_next_session(exercises, missed,
+                                      float(upper_inc), float(lower_inc))
+
+            st.markdown("### Next session targets")
+            day = None
+            for r in recs:
+                if r["day"] != day:
+                    day = r["day"]
+                    st.markdown(f"**{day}**")
+                tag = "🟢" if r["delta"] > 0 else "⚪"
+                each = " each" if r["each"] else ""
+                change = f"  (+{r['delta']:g})" if r["delta"] > 0 else "  (hold)"
+                st.write(f"{tag} **{r['name']}** "
+                         f"({r['region']}): {r['next_weight']:g} lbs{each} "
+                         f"for 4x{r['reps']}{change}")
+
+            st.markdown("---")
+            st.markdown("**Copy back into your notes:**")
+            st.code(format_session_text(recs), language="text")
 
 
 if __name__ == "__main__":
