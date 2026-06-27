@@ -109,3 +109,14 @@ https://legionathletics.com/double-progression/
 5. Open Settings -> Secrets and add your model key, e.g.
    `OPENAI_API_KEY = "sk-..."`, so the Study tab works without anyone typing
    a key.
+
+## Tests & CI
+
+```bash
+pip install pytest
+pytest -q
+```
+
+Unit tests live in `test_app.py` and cover the core logic. GitHub Actions
+(`.github/workflows/ci.yml`) runs them automatically on every push and pull
+request, so the repo shows a green check when everything passes.
