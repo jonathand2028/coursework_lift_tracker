@@ -74,3 +74,26 @@ def test_build_quiz_prompt_includes_material():
     p = app.build_quiz_prompt("photosynthesis basics", "Multiple choice", 5)
     assert "photosynthesis basics" in p
     assert "5 multiple choice" in p
+
+
+def test_database_save_and_load_roundtrip():
+    conn = app.get_connection(":memory:")
+    app.init_db(conn)
+    assert app.load_latest_rows(conn) == []
+
+    rows = app.parse_workout(app.SAMPLE_NOTES)
+    app.save_session(conn, rows, ts="2026-06-20T10:00:00")
+    loaded = app.load_latest_rows(conn)
+    # same lift can repeat across days, so all rows are preserved by (day, lift)
+    assert len(loaded) == len(rows)
+    by = {(r["Day"], r["Exercise"]): r for r in loaded}
+    strength_squat = by[("Strength Training", "Back Squats")]
+    assert strength_squat["Weight"] == 325
+    assert strength_squat["Rep low"] == 4
+
+    # a newer session for that lift should win in load_latest_rows
+    app.save_session(conn, [{**strength_squat, "Weight": 335}],
+                     ts="2026-06-23T10:00:00")
+    again = {(r["Day"], r["Exercise"]): r for r in app.load_latest_rows(conn)}
+    assert again[("Strength Training", "Back Squats")]["Weight"] == 335
+    assert len(app.session_dates(conn)) == 2

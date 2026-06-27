@@ -120,3 +120,25 @@ pytest -q
 Unit tests live in `test_app.py` and cover the core logic. GitHub Actions
 (`.github/workflows/ci.yml`) runs them automatically on every push and pull
 request, so the repo shows a green check when everything passes.
+
+## Database (workout history)
+
+The Lift tab saves your sessions so history survives between visits. After you
+enter a session, click "Save this session to history". Next time, choose "My
+saved history" to reload your last weights and reps instead of re-pasting notes.
+
+By default this uses **SQLite**, Python's built-in database, written to a local
+file (`tracker.db`). No setup and no extra packages. This is durable on your own
+machine.
+
+Note on hosting: Streamlit Community Cloud has an ephemeral filesystem, so the
+SQLite file resets when the app restarts. For the LIVE app to remember data
+permanently, connect a hosted Postgres database (Supabase has a free tier):
+
+1. Create a free project at https://supabase.com and open Project Settings ->
+   Database -> Connection string (URI).
+2. In the Streamlit app, Settings -> Secrets, add `DATABASE_URL = "postgresql://..."`.
+3. Point `get_connection()` at that URL with a Postgres driver
+   (`psycopg2-binary`). The table schema is standard SQL and does not change.
+
+Until then, SQLite works out of the box for local use and demos.

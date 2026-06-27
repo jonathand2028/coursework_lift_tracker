@@ -28,8 +28,11 @@ Run it:
 """
 
 import io
+import os
 import re
 import json
+import sqlite3
+from datetime import datetime, timezone
 
 # ======================================================================
 #  STUDY: prompt + LLM calls + parsing  (pure/testable)
@@ -269,6 +272,112 @@ Accessory / Aesthetic Day (Dumbbells)
 
 
 # ======================================================================
+#  DATABASE: workout history persistence  (stdlib sqlite3, testable)
+# ======================================================================
+#
+# This uses Python's built-in SQLite, so it works with zero extra packages
+# and persists to a local file. To upgrade to a hosted database later
+# (e.g. Supabase Postgres so the LIVE app remembers data across restarts),
+# only get_connection() changes; the SQL below is standard. See README.
+
+COLS = ["Day", "Exercise", "Type", "Weight", "Rep low", "Rep high",
+        "Reps last", "Hit all sets", "Add (lbs)", "_rep_step"]
+
+
+def get_connection(db_path="tracker.db"):
+    """Return a SQLite connection. Pass ':memory:' in tests."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            day TEXT, exercise TEXT, type TEXT,
+            weight REAL, rep_low INTEGER, rep_high INTEGER,
+            reps_last INTEGER, increment REAL, rep_step INTEGER
+        )""")
+    conn.commit()
+
+
+def save_session(conn, rows, ts=None):
+    """Persist one workout session (a list of exercise row dicts)."""
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        conn.execute(
+            "INSERT INTO sessions (ts, day, exercise, type, weight, rep_low, "
+            "rep_high, reps_last, increment, rep_step) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, r.get("Day"), r.get("Exercise"), r.get("Type"),
+             float(r.get("Weight", 0)), int(r.get("Rep low", 0)),
+             int(r.get("Rep high", 0)), int(r.get("Reps last", 0)),
+             float(r.get("Add (lbs)", 0)), int(r.get("_rep_step", 1))))
+    conn.commit()
+    return ts
+
+
+def load_latest_rows(conn):
+    """Reconstruct editor rows from each exercise's most recent saved entry."""
+    cur = conn.execute("SELECT * FROM sessions ORDER BY ts DESC, id DESC")
+    seen, rows = set(), []
+    for r in cur.fetchall():
+        key = (r["day"], r["exercise"])  # same lift can appear on different days
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "Day": r["day"], "Exercise": r["exercise"], "Type": r["type"],
+            "Weight": r["weight"], "Rep low": r["rep_low"],
+            "Rep high": r["rep_high"], "Reps last": r["reps_last"],
+            "Hit all sets": True, "Add (lbs)": r["increment"],
+            "_rep_step": r["rep_step"],
+        })
+    return rows
+
+
+def session_dates(conn, limit=10):
+    """Distinct saved session timestamps, newest first."""
+    cur = conn.execute(
+        "SELECT ts, COUNT(*) n FROM sessions GROUP BY ts ORDER BY ts DESC LIMIT ?",
+        (limit,))
+    return [(r["ts"], r["n"]) for r in cur.fetchall()]
+
+
+# ======================================================================
+#  THEME: custom CSS for a polished, branded look
+# ======================================================================
+
+THEME_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+html, body, [class*="css"], .stMarkdown, button, input, textarea { font-family: 'Inter', sans-serif !important; }
+.block-container { padding-top: 1.5rem; max-width: 900px; }
+.app-hero {
+  background: linear-gradient(135deg, #E8590C 0%, #F08C00 100%);
+  color: #fff; padding: 22px 28px; border-radius: 16px; margin-bottom: 20px;
+  box-shadow: 0 6px 18px rgba(232,89,12,0.25);
+}
+.app-hero h1 { color:#fff !important; margin:0; font-weight:800; font-size:1.7rem; }
+.app-hero p { color:#fff2e8; margin:6px 0 0; font-size:0.95rem; }
+.stButton>button { border-radius:10px; font-weight:600; border:none; }
+.stButton>button[kind="primary"] { background:#E8590C; }
+.stTabs [data-baseweb="tab"] { font-weight:600; }
+div[data-testid="stMetric"] { background:#FFF4EC; padding:14px 16px; border-radius:12px; border:1px solid #ffe0cc; }
+div[data-testid="stExpander"] { border-radius:12px; }
+</style>
+"""
+
+HERO_HTML = """
+<div class="app-hero">
+  <h1>🏋️ Coursework &amp; Lift Tracker</h1>
+  <p>AI quizzes from your notes, and your next workout by double progression.</p>
+</div>
+"""
+
+
+# ======================================================================
 #  Streamlit UI
 # ======================================================================
 
@@ -288,9 +397,14 @@ def main():
     import streamlit as st
     import pandas as pd
 
-    st.set_page_config(page_title="Coursework & Lift Tracker", page_icon="📚",
+    st.set_page_config(page_title="Coursework & Lift Tracker", page_icon="🏋️",
                        layout="centered")
-    st.title("Coursework & Lift Tracker")
+    st.markdown(THEME_CSS, unsafe_allow_html=True)
+    st.markdown(HERO_HTML, unsafe_allow_html=True)
+
+    # database connection (local SQLite file, or Postgres if configured: see README)
+    conn = get_connection(os.environ.get("TRACKER_DB", "tracker.db"))
+    init_db(conn)
 
     study_tab, lift_tab = st.tabs(["📚 Study", "🏋️ Lift"])
 
@@ -381,8 +495,28 @@ def main():
                 "- **Uncheck 'Hit all sets'** for anything you missed and it "
                 "holds the weight. Nothing auto-progresses.")
 
-        notes = st.text_area("Your workout notes", value=SAMPLE_NOTES, height=200)
-        rows = parse_workout(notes) if notes.strip() else []
+        saved = load_latest_rows(conn)
+        if saved:
+            source = st.radio(
+                "Start from", ["My saved history", "Paste notes"],
+                horizontal=True,
+                help="Your last saved session is loaded from the database.")
+        else:
+            source = "Paste notes"
+            st.caption("No saved sessions yet. Paste your notes, then click "
+                       "Save session to start your history.")
+
+        if source == "My saved history":
+            rows = saved
+            with st.expander(f"Loaded {len(saved)} lifts from your last session"):
+                hist = session_dates(conn)
+                st.write("Recent saved sessions:")
+                for ts, n in hist:
+                    st.caption(f"- {ts[:16].replace('T', ' ')}  ({n} lifts)")
+        else:
+            notes = st.text_area("Your workout notes", value=SAMPLE_NOTES,
+                                 height=200)
+            rows = parse_workout(notes) if notes.strip() else []
 
         if not rows:
             st.info("Paste lines like '4 sets of 4 bench press (working sets 175 pounds)'.")
@@ -399,6 +533,11 @@ def main():
             merged = edited.to_dict("records")
             for m in merged:
                 m["_rep_step"] = step_by_name.get(m["Exercise"], 1)
+
+            if st.button("💾 Save this session to history", type="primary"):
+                ts = save_session(conn, merged)
+                st.success(f"Saved {len(merged)} lifts. Next visit, pick "
+                           "'My saved history' to pick up where you left off.")
 
             recs = recommend(merged)
             st.markdown("### Next session")
