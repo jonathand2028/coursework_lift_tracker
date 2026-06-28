@@ -97,3 +97,36 @@ def test_database_save_and_load_roundtrip():
     again = {(r["Day"], r["Exercise"]): r for r in app.load_latest_rows(conn)}
     assert again[("Strength Training", "Back Squats")]["Weight"] == 335
     assert len(app.session_dates(conn)) == 2
+
+
+def test_exercise_progress_and_body_metrics():
+    conn = app.get_connection(":memory:")
+    app.init_db(conn)
+    app.save_session(conn, [{"Day": "S", "Exercise": "Bench", "Type": "compound_upper",
+                             "Weight": 175, "Rep low": 4, "Rep high": 6,
+                             "Reps last": 4, "Add (lbs)": 5, "_rep_step": 1}],
+                     ts="2026-06-01T00:00:00")
+    app.save_session(conn, [{"Day": "S", "Exercise": "Bench", "Type": "compound_upper",
+                             "Weight": 180, "Rep low": 4, "Rep high": 6,
+                             "Reps last": 6, "Add (lbs)": 5, "_rep_step": 1}],
+                     ts="2026-06-08T00:00:00")
+    prog = app.exercise_progress(conn, "S", "Bench")
+    assert [w for _, w in prog] == [175, 180]
+
+    app.save_body_metric(conn, 185.0, 14.0, ts="2026-06-01T00:00:00")
+    app.save_body_metric(conn, 183.5, 13.5, ts="2026-06-08T00:00:00")
+    metrics = app.load_body_metrics(conn)
+    assert len(metrics) == 2
+    assert metrics[0]["bodyweight"] == 185.0
+
+
+def test_summarize_recs():
+    recs = [{"action": "add load"}, {"action": "add reps"}, {"action": "hold"}]
+    s = app.summarize_recs(recs)
+    assert "moving up" in s and "adding reps" in s and "holding" in s
+
+
+def test_study_guide_prompt():
+    p = app.build_quiz_prompt("cells and mitochondria", "Topic study guide", 4)
+    assert "cells and mitochondria" in p
+    assert "important topics" in p

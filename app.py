@@ -39,17 +39,28 @@ from datetime import datetime, timezone
 # ======================================================================
 
 def build_quiz_prompt(source_text, qtype, n):
-    if qtype == "Multiple choice":
+    if qtype == "Topic study guide":
+        shape = ('a JSON array of objects, each: {"question": "the topic name", '
+                 '"choices": [], "answer": "a clear 2-4 sentence explanation of '
+                 'that topic", "explanation": ""}')
+        instruction = (
+            f"identify the {n} most important topics and explain each one "
+            f"clearly, expanding on the ideas but staying strictly faithful to "
+            f"the material (do not invent facts not supported by it)")
+    elif qtype == "Multiple choice":
         shape = ('a JSON array of objects, each: {"question": str, '
                  '"choices": [4 strings], "answer": "the exact correct choice", '
                  '"explanation": str}')
+        instruction = (f"write {n} multiple choice questions that test "
+                       f"understanding of the key concepts")
     else:
         shape = ('a JSON array of objects, each: {"question": str, '
                  '"choices": [], "answer": str, "explanation": str}')
+        instruction = (f"write {n} short answer questions that test "
+                       f"understanding of the key concepts")
     return (
-        f"You are a study-quiz generator. Using ONLY the material below, write "
-        f"{n} {qtype.lower()} questions that test understanding of the key "
-        f"concepts. Return {shape}. Return JSON only, no prose.\n\n"
+        f"You are a study assistant. Using ONLY the material below, {instruction}. "
+        f"Return {shape}. Return JSON only, no prose.\n\n"
         f"MATERIAL:\n{source_text[:8000]}"
     )
 
@@ -300,6 +311,12 @@ def init_db(conn):
             weight REAL, rep_low INTEGER, rep_high INTEGER,
             reps_last INTEGER, increment REAL, rep_step INTEGER
         )""")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS body_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            bodyweight REAL, bodyfat REAL, note TEXT
+        )""")
     conn.commit()
 
 
@@ -343,6 +360,47 @@ def session_dates(conn, limit=10):
         "SELECT ts, COUNT(*) n FROM sessions GROUP BY ts ORDER BY ts DESC LIMIT ?",
         (limit,))
     return [(r["ts"], r["n"]) for r in cur.fetchall()]
+
+
+def exercise_progress(conn, day, exercise):
+    """Return [(ts, weight)] over time for one lift, oldest first."""
+    cur = conn.execute(
+        "SELECT ts, weight FROM sessions WHERE day=? AND exercise=? ORDER BY ts ASC",
+        (day, exercise))
+    return [(r["ts"], r["weight"]) for r in cur.fetchall()]
+
+
+def save_body_metric(conn, bodyweight, bodyfat, note="", ts=None):
+    ts = ts or datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO body_metrics (ts, bodyweight, bodyfat, note) VALUES (?,?,?,?)",
+        (ts, bodyweight, bodyfat, note))
+    conn.commit()
+    return ts
+
+
+def load_body_metrics(conn, limit=60):
+    cur = conn.execute(
+        "SELECT ts, bodyweight, bodyfat, note FROM body_metrics "
+        "ORDER BY ts ASC LIMIT ?", (limit,))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def summarize_recs(recs):
+    """Plain-language feedback on a session's recommendations."""
+    counts = {}
+    for r in recs:
+        counts[r["action"]] = counts.get(r["action"], 0) + 1
+    parts = []
+    if counts.get("add load"):
+        parts.append(f"{counts['add load']} lift(s) moving up in weight")
+    if counts.get("add reps"):
+        parts.append(f"{counts['add reps']} adding reps")
+    if counts.get("hold"):
+        parts.append(f"{counts['hold']} holding")
+    if counts.get("build"):
+        parts.append(f"{counts['build']} building into range")
+    return "This session: " + ", ".join(parts) + "." if parts else ""
 
 
 # ======================================================================
@@ -427,12 +485,23 @@ def main():
         pdf = st.file_uploader("Lecture notes / textbook PDF", type=["pdf"])
         pasted = st.text_area("...or paste your notes here", height=150)
 
-        c1, c2 = st.columns(2)
-        qtype = c1.radio("Question type", ["Multiple choice", "Short answer"],
-                         horizontal=True)
-        n = c2.slider("How many questions", 3, 15, 6)
+        qtype = st.radio(
+            "Mode", ["Multiple choice", "Short answer", "Topic study guide"],
+            horizontal=True)
+        # instant feedback the moment a mode is selected
+        hints = {
+            "Multiple choice": "Questions with four options and a revealed answer.",
+            "Short answer": "Open questions you answer, then reveal the model answer.",
+            "Topic study guide": "Key topics from your notes, explained and expanded "
+                                 "(still grounded in your notes).",
+        }
+        st.caption(hints[qtype])
+        label = "How many topics" if qtype == "Topic study guide" else "How many questions"
+        n = st.slider(label, 3, 15, 6)
+        btn_label = ("Generate study guide" if qtype == "Topic study guide"
+                     else "Generate practice test")
 
-        if st.button("Generate practice test", type="primary"):
+        if st.button(btn_label, type="primary"):
             key = _resolve_key(provider, ui_key)
             source = ""
             if pdf:
@@ -457,22 +526,30 @@ def main():
 
         quiz = st.session_state.get("quiz")
         if quiz:
+            qmode = st.session_state.get("quiz_type")
             st.markdown("---")
-            st.markdown("### Practice Test")
-            mc = st.session_state.get("quiz_type") == "Multiple choice"
-            for i, q in enumerate(quiz, 1):
-                st.markdown(f"**{i}. {q['question']}**")
-                if mc and q["choices"]:
-                    st.radio("Choose:", q["choices"], key=f"ans_{i}",
-                             index=None, label_visibility="collapsed")
-                else:
-                    st.text_input("Your answer", key=f"ans_{i}",
-                                  label_visibility="collapsed")
-                with st.expander("Show answer"):
-                    st.success(q["answer"])
-                    if q["explanation"]:
-                        st.caption(q["explanation"])
-            if st.button("Clear test"):
+            if qmode == "Topic study guide":
+                st.markdown("### Study Guide")
+                for i, q in enumerate(quiz, 1):
+                    st.markdown(f"**{i}. {q['question']}**")
+                    st.write(q["answer"])
+                    st.markdown("")
+            else:
+                st.markdown("### Practice Test")
+                mc = qmode == "Multiple choice"
+                for i, q in enumerate(quiz, 1):
+                    st.markdown(f"**{i}. {q['question']}**")
+                    if mc and q["choices"]:
+                        st.radio("Choose:", q["choices"], key=f"ans_{i}",
+                                 index=None, label_visibility="collapsed")
+                    else:
+                        st.text_input("Your answer", key=f"ans_{i}",
+                                      label_visibility="collapsed")
+                    with st.expander("Show answer"):
+                        st.success(q["answer"])
+                        if q["explanation"]:
+                            st.caption(q["explanation"])
+            if st.button("Clear"):
                 st.session_state.pop("quiz", None)
                 st.rerun()
 
@@ -554,6 +631,47 @@ def main():
             st.markdown("---")
             st.markdown("**Copy back into your notes:**")
             st.code(format_session_text(recs), language="text")
+
+            fb = summarize_recs(recs)
+            if fb:
+                st.info(fb)
+
+        st.markdown("---")
+        with st.expander("📈 Progress over time"):
+            saved_now = load_latest_rows(conn)
+            if not saved_now:
+                st.caption("Save a few sessions to see your weight trends here.")
+            else:
+                opts = [f"{r['Day']} | {r['Exercise']}" for r in saved_now]
+                pick = st.selectbox("Lift", opts)
+                d, ex = pick.split(" | ", 1)
+                series = exercise_progress(conn, d, ex)
+                if len(series) < 2:
+                    st.caption("Only one session saved for this lift so far.")
+                else:
+                    dfp = pd.DataFrame(series, columns=["session", "weight"])
+                    dfp["session"] = dfp["session"].str[:10]
+                    st.line_chart(dfp.set_index("session"))
+
+        with st.expander("⚖️ Body metrics (bodyweight, body fat %)"):
+            st.caption("Everyone progresses differently. Log these over time to "
+                       "track your own trend.")
+            bc1, bc2 = st.columns(2)
+            bw = bc1.number_input("Bodyweight (lbs)", 0.0, 600.0, 0.0, step=0.5)
+            bf = bc2.number_input("Body fat %", 0.0, 60.0, 0.0, step=0.1)
+            if st.button("Save body metrics"):
+                if bw > 0 or bf > 0:
+                    save_body_metric(conn, bw or None, bf or None)
+                    st.success("Saved.")
+                else:
+                    st.warning("Enter a bodyweight or body fat % first.")
+            metrics = load_body_metrics(conn)
+            if len(metrics) >= 2:
+                dfm = pd.DataFrame(metrics)
+                dfm["ts"] = dfm["ts"].str[:10]
+                st.line_chart(dfm.set_index("ts")[["bodyweight", "bodyfat"]])
+            elif metrics:
+                st.caption("Log another entry to see a trend.")
 
 
 if __name__ == "__main__":
