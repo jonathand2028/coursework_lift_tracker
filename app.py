@@ -468,7 +468,7 @@ def main():
 
     # ----------------------------- STUDY -----------------------------
     with study_tab:
-        st.subheader("Generate a practice test from your notes")
+        st.subheader("Make a practice test or study guide from your notes")
         provider = st.selectbox("Model provider", ["OpenAI", "Anthropic"])
 
         configured = _resolve_key(provider, "")
@@ -477,10 +477,13 @@ def main():
                        "No key needed.")
             ui_key = ""
         else:
+            st.info("This needs an OpenAI or Anthropic API key. Paste one "
+                    "below, or set it once in the app's Secrets so you never "
+                    "type it again (see README).")
             ui_key = st.text_input(
                 "API key", type="password",
-                help="Tip: set OPENAI_API_KEY or ANTHROPIC_API_KEY in the "
-                     "app's Secrets so you never type this again.")
+                help="Set OPENAI_API_KEY or ANTHROPIC_API_KEY in the app's "
+                     "Secrets to skip this box.")
 
         pdf = st.file_uploader("Lecture notes / textbook PDF", type=["pdf"])
         pasted = st.text_area("...or paste your notes here", height=150)
@@ -516,7 +519,7 @@ def main():
             elif not key:
                 st.warning("No API key available. Add one in app settings or above.")
             else:
-                with st.spinner("Writing your quiz..."):
+                with st.spinner("Generating from your notes..."):
                     try:
                         st.session_state["quiz"] = generate_quiz(
                             key, provider, source, qtype, int(n))
@@ -598,6 +601,9 @@ def main():
         if not rows:
             st.info("Paste lines like '4 sets of 4 bench press (working sets 175 pounds)'.")
         else:
+            st.caption("Edit 'Reps last' to what you actually hit, and uncheck "
+                       "'Hit all sets' if you missed. Weights and rep ranges "
+                       "are editable too.")
             df = pd.DataFrame(rows)
             display_cols = ["Day", "Exercise", "Type", "Weight", "Rep low",
                             "Rep high", "Reps last", "Hit all sets", "Add (lbs)"]
@@ -630,7 +636,10 @@ def main():
 
             st.markdown("---")
             st.markdown("**Copy back into your notes:**")
-            st.code(format_session_text(recs), language="text")
+            next_text = format_session_text(recs)
+            st.code(next_text, language="text")
+            st.download_button("Download next session (.txt)", next_text,
+                               file_name="next_session.txt")
 
             fb = summarize_recs(recs)
             if fb:
