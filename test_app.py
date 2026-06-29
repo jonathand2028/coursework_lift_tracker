@@ -130,3 +130,33 @@ def test_study_guide_prompt():
     p = app.build_quiz_prompt("cells and mitochondria", "Topic study guide", 4)
     assert "cells and mitochondria" in p
     assert "important topics" in p
+
+
+def test_answer_matches_lenient():
+    assert app.answer_matches("Paris", "paris")
+    assert app.answer_matches("B) Mitochondria", "Mitochondria")
+    assert app.answer_matches("the cell wall", "Cell Wall")
+    assert not app.answer_matches("Nucleus", "Ribosome")
+    assert not app.answer_matches(None, "Anything")
+
+
+def test_grade_mc_scores_correctly():
+    quiz = [
+        {"question": "Capital of France?", "choices": ["Paris", "Rome"], "answer": "Paris"},
+        {"question": "2+2?", "choices": ["3", "4"], "answer": "4"},
+        {"question": "Sky color?", "choices": ["Blue", "Green"], "answer": "Blue"},
+    ]
+    answers = {1: "Paris", 2: "3", 3: None}
+    score, results = app.grade_mc(quiz, answers)
+    assert score == 1
+    assert results[0]["correct"] and not results[1]["correct"]
+    assert results[2]["selected"] is None
+
+
+def test_build_coach_prompt_includes_lifts():
+    recs = [{"Exercise": "Back Squats", "Type": "compound_lower",
+             "action": "add load", "next_weight": 335, "next_reps": 4}]
+    p = app.build_coach_prompt(recs, metrics=[{"bodyweight": 185}])
+    assert "Back Squats" in p
+    assert "strength coach" in p
+    assert "185" in p

@@ -113,6 +113,64 @@ def generate_quiz(api_key, provider, source_text, qtype, n):
     return parse_quiz_json(content)
 
 
+def _norm(s):
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+def answer_matches(selected, answer):
+    """Lenient comparison of a chosen option against the correct answer."""
+    s, a = _norm(selected), _norm(answer)
+    if not s or not a:
+        return False
+    if s == a:
+        return True
+    # ignore leading "a)" / "b." style labels
+    s2 = re.sub(r"^[a-d][).\.]\s*", "", s)
+    a2 = re.sub(r"^[a-d][).\.]\s*", "", a)
+    if s2 == a2:
+        return True
+    return len(a) > 3 and (a in s or s in a)
+
+
+def grade_mc(quiz, answers):
+    """Score multiple-choice answers.
+
+    `answers` maps 1-based question number -> the selected option string.
+    Returns (num_correct, results list).
+    """
+    results, correct = [], 0
+    for i, q in enumerate(quiz, 1):
+        sel = answers.get(i)
+        ok = answer_matches(sel, q.get("answer", ""))
+        correct += 1 if ok else 0
+        results.append({"i": i, "selected": sel,
+                        "answer": q.get("answer", ""), "correct": ok})
+    return correct, results
+
+
+def build_coach_prompt(recs, metrics=None):
+    """Prompt for short, practical lifting feedback based on the next session."""
+    lines = [f"{r['Exercise']} ({r['Type']}): {r['action']}, next "
+             f"{r['next_weight']:g} lb x {r['next_reps']} reps"
+             for r in recs]
+    body = ""
+    if metrics:
+        bws = [str(m["bodyweight"]) for m in metrics[-5:] if m.get("bodyweight")]
+        if bws:
+            body = "\nRecent bodyweight (lbs): " + ", ".join(bws)
+    return (
+        "You are a practical, encouraging strength coach. Based ONLY on this "
+        "planned next session, give 3 to 4 short, specific tips: form cues, "
+        "when to push vs hold, and recovery. Be concise and motivating. Do not "
+        "give medical advice.\n\nNEXT SESSION:\n" + "\n".join(lines) + body)
+
+
+def coach_feedback(api_key, provider, recs, metrics=None):
+    prompt = build_coach_prompt(recs, metrics)
+    return (call_anthropic(api_key, prompt) if provider == "Anthropic"
+            else call_openai(api_key, prompt))
+
+
 def read_pdf_text(file_bytes):
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(file_bytes))
@@ -451,6 +509,19 @@ def _resolve_key(provider, ui_key):
         return ""
 
 
+def _resolve_any_key():
+    """Return (provider, key) from whichever key is configured in Secrets."""
+    import streamlit as st
+    try:
+        if st.secrets.get("OPENAI_API_KEY"):
+            return "OpenAI", st.secrets["OPENAI_API_KEY"]
+        if st.secrets.get("ANTHROPIC_API_KEY"):
+            return "Anthropic", st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        pass
+    return None, ""
+
+
 def main():
     import streamlit as st
     import pandas as pd
@@ -552,6 +623,19 @@ def main():
                         st.success(q["answer"])
                         if q["explanation"]:
                             st.caption(q["explanation"])
+
+                if mc:
+                    if st.button("Check my answers", type="primary"):
+                        answers = {i: st.session_state.get(f"ans_{i}")
+                                   for i in range(1, len(quiz) + 1)}
+                        score, results = grade_mc(quiz, answers)
+                        pct = round(100 * score / len(quiz))
+                        st.markdown(f"### Score: {score} / {len(quiz)}  ({pct}%)")
+                        for r in results:
+                            mark = "✅" if r["correct"] else "❌"
+                            chose = r["selected"] or "(no answer)"
+                            st.write(f"{mark} Q{r['i']}: you chose "
+                                     f"_{chose}_ · correct: **{r['answer']}**")
             if st.button("Clear"):
                 st.session_state.pop("quiz", None)
                 st.rerun()
@@ -644,6 +728,24 @@ def main():
             fb = summarize_recs(recs)
             if fb:
                 st.info(fb)
+
+            st.markdown("**Want a coach's take?**")
+            cprov, ckey = _resolve_any_key()
+            if st.button("🧠 Get coach feedback"):
+                if not ckey:
+                    st.warning("Set an OpenAI or Anthropic API key in the app's "
+                               "Secrets to use coach feedback (same key as the "
+                               "Study tab).")
+                else:
+                    with st.spinner("Asking your coach..."):
+                        try:
+                            metrics = load_body_metrics(conn)
+                            tip = coach_feedback(ckey, cprov, recs, metrics)
+                            st.session_state["coach_tip"] = tip
+                        except Exception as e:
+                            st.error(f"Coach feedback failed: {e}")
+            if st.session_state.get("coach_tip"):
+                st.markdown(st.session_state["coach_tip"])
 
         st.markdown("---")
         with st.expander("📈 Progress over time"):
