@@ -6,3 +6,5 @@ test_invoice.pdf
 .DS_Store
 *.db
 tracker.db
+.env
+*.env
