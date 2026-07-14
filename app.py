@@ -30,6 +30,7 @@ Run it:
 import io
 import os
 import re
+import csv
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -629,15 +630,43 @@ def main():
                         answers = {i: st.session_state.get(f"ans_{i}")
                                    for i in range(1, len(quiz) + 1)}
                         score, results = grade_mc(quiz, answers)
-                        pct = round(100 * score / len(quiz))
-                        st.markdown(f"### Score: {score} / {len(quiz)}  ({pct}%)")
+                        st.session_state["mc_results"] = results
+                        st.session_state["mc_total"] = len(quiz)
+                    if st.session_state.get("mc_results"):
+                        results = st.session_state["mc_results"]
+                        total = st.session_state["mc_total"]
+                        score = sum(1 for r in results if r["correct"])
+                        pct = round(100 * score / total)
+                        st.markdown(f"### Score: {score} / {total}  ({pct}%)")
                         for r in results:
                             mark = "✅" if r["correct"] else "❌"
                             chose = r["selected"] or "(no answer)"
                             st.write(f"{mark} Q{r['i']}: you chose "
                                      f"_{chose}_ · correct: **{r['answer']}**")
+                        missed = [r["i"] for r in results if not r["correct"]]
+                        if missed and st.button(
+                                f"Re-quiz the {len(missed)} I missed"):
+                            st.session_state["quiz"] = [quiz[i - 1] for i in missed]
+                            for k in [k for k in st.session_state
+                                      if k.startswith("ans_")]:
+                                st.session_state.pop(k, None)
+                            st.session_state.pop("mc_results", None)
+                            st.rerun()
+
+            # download the quiz (works for every mode)
+            buf = io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["question", "choices", "answer", "explanation"])
+            for q in quiz:
+                w.writerow([q["question"], " | ".join(q["choices"]),
+                            q["answer"], q["explanation"]])
+            st.download_button("Download quiz (CSV, works with Anki)",
+                               buf.getvalue(), file_name="quiz.csv",
+                               mime="text/csv")
+
             if st.button("Clear"):
-                st.session_state.pop("quiz", None)
+                for key in ("quiz", "mc_results", "mc_total"):
+                    st.session_state.pop(key, None)
                 st.rerun()
 
     # ----------------------------- LIFT ------------------------------
