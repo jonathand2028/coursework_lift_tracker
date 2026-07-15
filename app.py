@@ -494,32 +494,70 @@ def summarize_recs(recs):
 
 THEME_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-html, body, [class*="css"], .stMarkdown, button, input, textarea { font-family: 'Inter', sans-serif !important; }
-.block-container { padding-top: 1.5rem; max-width: 900px; }
-.app-hero {
-  background: linear-gradient(135deg, #E8590C 0%, #F08C00 100%);
-  color: #fff; padding: 22px 28px; border-radius: 16px; margin-bottom: 20px;
-  box-shadow: 0 6px 18px rgba(232,89,12,0.25);
-}
-.app-hero h1 { color:#fff !important; margin:0; font-weight:800; font-size:1.7rem; }
-.app-hero p { color:#fff2e8; margin:6px 0 0; font-size:0.95rem; }
-.stButton>button { border-radius:10px; font-weight:600; border:none; }
-.stButton>button[kind="primary"] { background:#E8590C; }
-.stTabs [data-baseweb="tab"] { font-weight:600; }
-div[data-testid="stMetric"] { background:#FFF4EC; padding:14px 16px; border-radius:12px; border:1px solid #ffe0cc; }
-div[data-testid="stExpander"] { border-radius:12px; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, [class*="css"], .stMarkdown, button, input, textarea, select { font-family: 'Inter', sans-serif !important; }
+.stApp { background: #fdf9f5; }
+.block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 880px; }
 #MainMenu, [data-testid="stToolbar"], [data-testid="stDecoration"] { display:none !important; }
 header { visibility:hidden; height:0; }
 footer { visibility:hidden; }
-.app-foot { text-align:center; color:#b08968; font-size:12px; margin-top:28px; padding-top:12px; border-top:1px solid #f0e0d2; }
+
+/* hero */
+.hero {
+  background: linear-gradient(135deg, #c2410c 0%, #E8590C 55%, #F59120 100%);
+  color:#fff; padding: 38px 36px 32px; border-radius: 22px; margin-bottom: 26px;
+  box-shadow: 0 16px 40px rgba(194,65,12,.28); position:relative; overflow:hidden;
+}
+.hero::after { content:""; position:absolute; right:-60px; top:-60px; width:260px; height:260px;
+  background:radial-gradient(circle, rgba(255,255,255,.18), transparent 70%); }
+.hero-badge { display:inline-block; background:rgba(255,255,255,.20); color:#fff; font-size:11px;
+  font-weight:700; letter-spacing:.14em; padding:6px 13px; border-radius:20px; margin-bottom:16px; }
+.hero h1 { color:#fff !important; margin:0; font-weight:800; font-size:2.15rem; line-height:1.12; letter-spacing:-.02em; }
+.hero p { color:#fff1e6; margin:14px 0 0; font-size:1.02rem; max-width:600px; line-height:1.55; }
+.pills { margin-top:20px; display:flex; flex-wrap:wrap; gap:9px; position:relative; z-index:1; }
+.pills span { background:rgba(255,255,255,.17); color:#fff; font-size:12.5px; font-weight:600;
+  padding:7px 13px; border-radius:20px; border:1px solid rgba(255,255,255,.16); }
+
+/* headings */
+h1,h2,h3 { letter-spacing:-.01em; }
+.stMarkdown h3 { color:#9a3412; font-weight:700; }
+
+/* tabs as a segmented control */
+.stTabs [data-baseweb="tab-list"] { gap:6px; background:#fbe8db; padding:6px; border-radius:14px; }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] { display:none; }
+.stTabs [data-baseweb="tab"] { border-radius:10px; padding:9px 20px; font-weight:600; color:#8a5a3c; }
+.stTabs [aria-selected="true"] { background:#fff; color:#9a3412 !important; box-shadow:0 2px 8px rgba(194,65,12,.14); }
+
+/* buttons */
+.stButton>button { border-radius:11px; font-weight:600; padding:9px 20px; border:1px solid #f2d3bd;
+  background:#fff; color:#c2410c; transition:all .15s ease; }
+.stButton>button:hover { border-color:#E8590C; transform:translateY(-1px); box-shadow:0 6px 16px rgba(232,89,12,.18); }
+.stButton>button[kind="primary"] { background:linear-gradient(135deg,#E8590C,#c2410c); color:#fff; border:none;
+  box-shadow:0 6px 16px rgba(194,65,12,.28); }
+.stDownloadButton>button { border-radius:11px; font-weight:600; }
+
+/* inputs */
+.stTextInput input, .stTextArea textarea, .stNumberInput input, .stSelectbox div[data-baseweb="select"] > div {
+  border-radius:11px !important; }
+[data-testid="stFileUploaderDropzone"] { border-radius:14px; border:1.5px dashed #f0c3a0; background:#fdf6f0; }
+
+/* cards: expanders + metrics */
+div[data-testid="stExpander"] { border:1px solid #f3e2d4; border-radius:16px; background:#fff;
+  box-shadow:0 1px 3px rgba(120,60,20,.05); overflow:hidden; }
+div[data-testid="stExpander"] summary { font-weight:600; padding:4px 2px; }
+div[data-testid="stMetric"] { background:#fff; padding:16px 18px; border-radius:16px; border:1px solid #f3e2d4;
+  box-shadow:0 1px 3px rgba(120,60,20,.05); }
+
+.app-foot { text-align:center; color:#b08968; font-size:12px; margin-top:34px; padding-top:14px; border-top:1px solid #f0e0d2; }
 </style>
 """
 
 HERO_HTML = """
-<div class="app-hero">
-  <h1>🏋️ Coursework &amp; Lift Tracker</h1>
-  <p>AI quizzes from your notes, and your next workout by double progression.</p>
+<div class="hero">
+  <div class="hero-badge">STUDY + TRAIN</div>
+  <h1>Study smarter. Lift stronger.</h1>
+  <p>Turn your class notes into quizzes that grade you, and your workout log into your exact next session, with progress you can actually see.</p>
+  <div class="pills"><span>AI quizzes</span><span>Auto-graded</span><span>Progress charts</span><span>Coach feedback</span></div>
 </div>
 """
 
