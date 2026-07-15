@@ -48,6 +48,22 @@ def build_quiz_prompt(source_text, qtype, n):
             f"identify the {n} most important topics and explain each one "
             f"clearly, expanding on the ideas but staying strictly faithful to "
             f"the material (do not invent facts not supported by it)")
+    elif qtype == "Common mistakes":
+        shape = ('a JSON array of objects, each: {"question": "the common '
+                 'mistake or misconception", "choices": [], "answer": "a clear '
+                 'explanation of the correct understanding", "explanation": ""}')
+        instruction = (
+            f"identify the {n} concepts in this material that students most "
+            f"often get wrong or misunderstand, and explain the correct "
+            f"understanding for each, based only on the material")
+    elif qtype == "Exam-style questions":
+        shape = ('a JSON array of objects, each: {"question": "an exam-style '
+                 'question a professor might ask", "choices": [], "answer": "a '
+                 'model answer", "explanation": ""}')
+        instruction = (
+            f"write {n} challenging exam-style questions a professor might ask "
+            f"on this material, each with a model answer, based only on the "
+            f"material")
     elif qtype == "Multiple choice":
         shape = ('a JSON array of objects, each: {"question": str, '
                  '"choices": [4 strings], "answer": "the exact correct choice", '
@@ -309,6 +325,16 @@ def recommend(rows):
     return out
 
 
+def estimate_1rm(weight, reps):
+    """Estimated one-rep max via the Epley formula, rounded to nearest 5 lb."""
+    weight, reps = float(weight), max(int(reps), 1)
+    if reps == 1:
+        orm = weight
+    else:
+        orm = weight * (1 + reps / 30.0)
+    return round(orm / 5.0) * 5
+
+
 def format_session_text(recs):
     lines, day = [], None
     for r in recs:
@@ -483,6 +509,10 @@ html, body, [class*="css"], .stMarkdown, button, input, textarea { font-family: 
 .stTabs [data-baseweb="tab"] { font-weight:600; }
 div[data-testid="stMetric"] { background:#FFF4EC; padding:14px 16px; border-radius:12px; border:1px solid #ffe0cc; }
 div[data-testid="stExpander"] { border-radius:12px; }
+#MainMenu, [data-testid="stToolbar"], [data-testid="stDecoration"] { display:none !important; }
+header { visibility:hidden; height:0; }
+footer { visibility:hidden; }
+.app-foot { text-align:center; color:#b08968; font-size:12px; margin-top:28px; padding-top:12px; border-top:1px solid #f0e0d2; }
 </style>
 """
 
@@ -561,7 +591,8 @@ def main():
         pasted = st.text_area("...or paste your notes here", height=150)
 
         qtype = st.radio(
-            "Mode", ["Multiple choice", "Short answer", "Topic study guide"],
+            "Mode", ["Multiple choice", "Short answer", "Topic study guide",
+                     "Common mistakes", "Exam-style questions"],
             horizontal=True)
         # instant feedback the moment a mode is selected
         hints = {
@@ -569,12 +600,16 @@ def main():
             "Short answer": "Open questions you answer, then reveal the model answer.",
             "Topic study guide": "Key topics from your notes, explained and expanded "
                                  "(still grounded in your notes).",
+            "Common mistakes": "The concepts students most often get wrong, with "
+                               "the correct understanding explained.",
+            "Exam-style questions": "Challenging questions a professor might ask, "
+                                    "each with a model answer.",
         }
         st.caption(hints[qtype])
-        label = "How many topics" if qtype == "Topic study guide" else "How many questions"
+        _open_modes = ("Topic study guide", "Common mistakes")
+        label = "How many items" if qtype in _open_modes else "How many questions"
         n = st.slider(label, 3, 15, 6)
-        btn_label = ("Generate study guide" if qtype == "Topic study guide"
-                     else "Generate practice test")
+        btn_label = "Generate" if qtype in _open_modes else "Generate practice test"
 
         if st.button(btn_label, type="primary"):
             key = _resolve_key(provider, ui_key)
@@ -603,8 +638,9 @@ def main():
         if quiz:
             qmode = st.session_state.get("quiz_type")
             st.markdown("---")
-            if qmode == "Topic study guide":
-                st.markdown("### Study Guide")
+            if qmode in ("Topic study guide", "Common mistakes"):
+                st.markdown("### " + ("Study Guide" if qmode == "Topic study guide"
+                                      else "Common Mistakes"))
                 for i, q in enumerate(quiz, 1):
                     st.markdown(f"**{i}. {q['question']}**")
                     st.write(q["answer"])
@@ -812,6 +848,27 @@ def main():
                 st.line_chart(dfm.set_index("ts")[["bodyweight", "bodyfat"]])
             elif metrics:
                 st.caption("Log another entry to see a trend.")
+
+        with st.expander("💪 Strength stats (estimated 1RM + personal records)"):
+            if not rows:
+                st.caption("Add lifts above to see stats.")
+            else:
+                stat_rows = []
+                for r in rows:
+                    reps = int(r["Reps last"]) or int(r["Rep high"])
+                    orm = estimate_1rm(float(r["Weight"]), reps)
+                    hist = [w for _, w in exercise_progress(conn, r["Day"],
+                                                            r["Exercise"])]
+                    is_pr = (not hist) or float(r["Weight"]) >= max(hist)
+                    stat_rows.append({"Exercise": r["Exercise"],
+                                      "Weight": r["Weight"], "Est. 1RM": orm,
+                                      "PR": "🏆" if is_pr else ""})
+                st.dataframe(stat_rows, use_container_width=True)
+                st.caption("1RM estimated with the Epley formula. Trophy = at or "
+                           "above your best saved weight for that lift.")
+
+    st.markdown('<div class="app-foot">Coursework &amp; Lift Tracker · '
+                'study.fraud-ai-detection.com</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

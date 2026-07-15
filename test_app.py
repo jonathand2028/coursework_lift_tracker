@@ -132,6 +132,20 @@ def test_study_guide_prompt():
     assert "important topics" in p
 
 
+def test_new_study_modes_prompts():
+    cm = app.build_quiz_prompt("photosynthesis", "Common mistakes", 3)
+    assert "photosynthesis" in cm and "often get wrong" in cm
+    ex = app.build_quiz_prompt("photosynthesis", "Exam-style questions", 3)
+    assert "exam-style questions" in ex
+
+
+def test_estimate_1rm():
+    assert app.estimate_1rm(100, 1) == 100
+    # Epley: 200 * (1 + 5/30) = 233.3 -> nearest 5 = 235
+    assert app.estimate_1rm(200, 5) == 235
+    assert app.estimate_1rm(135, 10) == 180
+
+
 def test_answer_matches_lenient():
     assert app.answer_matches("Paris", "paris")
     assert app.answer_matches("B) Mitochondria", "Mitochondria")
