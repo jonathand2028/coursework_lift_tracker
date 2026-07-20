@@ -6,8 +6,7 @@ quizzes, and a workout log into your exact next session.
 **Live demo:** https://study.fraud-ai-detection.com
 &nbsp;·&nbsp; ![CI](https://github.com/jonathand2028/coursework_lift_tracker/actions/workflows/ci.yml/badge.svg)
 
-<!-- Add a screenshot: take one of the live site, save as docs/screenshot.png. -->
-<!-- ![Screenshot](docs/screenshot.png) -->
+![Screenshot](docs/screenshot.png)
 
 ---
 
